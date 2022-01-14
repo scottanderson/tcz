@@ -40,32 +40,40 @@ def main():
     component_paths: dict[int, Path] = dict()
     component_data: dict = dict()
     base = get_path()
-    paths = list((base / "schematics" / "component_factory").rglob("circuit.data"))
-    for idx, path in enumerate(paths):
+    assert base.exists(), f"Path does not exist: {base}"
+    schematics = base / "schematics"
+    component_factory = schematics / "component_factory"
+    architecture = schematics / "architecture"
+    paths = list(component_factory.rglob("circuit.data"))
+    for idx, circuit_data in enumerate(paths):
         print(f"Loading components [{idx+1}/{len(paths)}]... ", end="\r")
-        data = save_monger.parse_state(list(path.read_bytes()))
+        data = save_monger.parse_state(list(circuit_data.read_bytes()))
         component_id = data["save_version"]
-        component_paths[component_id] = path
+        component_paths[component_id] = circuit_data
         component_data[component_id] = data
     print("")
     for architecture_name in options.architecture:
-        dir = base / "schematics" / "architecture" / architecture_name
-        path = dir / "circuit.data"
-        data = save_monger.parse_state(list(path.read_bytes()))
+        dir = architecture / architecture_name
+        circuit_data = dir / "circuit.data"
+        assembly_data = dir / "assembly.data"
+        data = save_monger.parse_state(list(circuit_data.read_bytes()))
         timestr = time.strftime("%Y%m%d-%H%M%S")
-        zip_path = base / f"{architecture_name}_{timestr}.zip"
+        zip_path = base.parent / f"{architecture_name}_{timestr}.zip"
         print(f"Writing {zip_path}")
         with ZipFile(zip_path, "w") as zip:
-            for p in [path, dir / "assembly.data"] + list(dir.rglob("*.assembly")):
-                arcname = p.relative_to(base)
+            def append_zip(file):
+                arcname = file.relative_to(base.parent)
                 print(arcname)
-                zip.write(p, arcname)
-            for dependency in data["dependencies"]:
-                assert dependency in component_paths, f"Dependency: {dependency} not found"
-                dep = component_paths[dependency]
-                arcname = dep.relative_to(base)
-                print(arcname)
-                zip.write(dep, arcname)
+                zip.write(file, arcname)
+            for p in [circuit_data, assembly_data] + list(dir.rglob("*.assembly")):
+                append_zip(p)
+            def add_deps(deps):
+                for dependency in deps:
+                    assert dependency in component_paths, f"Dependency: {dependency} not found"
+                    dep = component_paths[dependency]
+                    append_zip(dep)
+                    add_deps(component_data[dependency]["dependencies"])
+            add_deps(data["dependencies"])
 
 
 if __name__ == "__main__":
