@@ -63,6 +63,9 @@ def main():
         with ZipFile(zip_path, "w") as zip:
             def append_zip(file):
                 arcname = file.relative_to(base.parent)
+                if file.stat().st_size == 0:
+                    print(f"Ignoring empty file {arcname}")
+                    return
                 print(arcname)
                 zip.write(file, arcname)
             for p in [circuit_data, assembly_data] + list(dir.rglob("*.assembly")):
