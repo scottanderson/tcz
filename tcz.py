@@ -2,12 +2,14 @@
 #
 
 import argparse
-import nimporter, save_monger
+import nimporter
 import os
+import save_monger
 import sys
 import time
 from pathlib import Path
 from zipfile import ZipFile
+
 
 def get_path():
     match sys.platform.lower():
@@ -18,22 +20,94 @@ def get_path():
         case "linux":
             potential_paths = [Path("~/.local/share/godot/app_userdata/Turing Complete").expanduser(),
                                Path(os.path.expandvars("/mnt/c/Users/${USER}/AppData/Roaming/godot/app_userdata/Turing Complete/"))]  # WSL
-        case _:
-            print(f"Don't know where to find Turing Complete save on {sys.platform=}")
-            return None
-    for base_path in potential_paths:
-        if base_path.exists():
-            return base_path
-    print("You need Turing Complete installed to use everything here")
-    return None
+            for base_path in potential_paths:
+                if base_path.exists():
+                    return base_path
+            raise f"Unable to find TC save directory"
+    raise f"Platform not supported: {sys.platform=}"
 
-def append_zip(zip, base, file):
-    arcname = file.relative_to(base.parent)
+
+def append_zip(
+        zip: ZipFile,
+        arcname: str,
+        file: Path,
+        options: argparse.Namespace):
     if file.stat().st_size == 0:
-        print(f"Ignoring empty file {arcname}")
-        return
-    print(arcname)
+        if not options.include_empty_files:
+            if options.verbose > 1:
+                print(f"Ignoring empty file {arcname}")
+            return
+        if options.verbose > 1:
+            print(f"Including empty file {arcname}")
+    if options.verbose > 0:
+        print(arcname)
     zip.write(file, arcname)
+
+
+def zip_level(
+        base: Path,
+        level_name: str,
+        zip_path: Path,
+        options: argparse.Namespace):
+    try:
+        print(f"Writing {zip_path}")
+        with ZipFile(zip_path, "w") as zip:
+            dir = base / "schematics" / level_name
+            for p in list(dir.rglob("circuit.data")):
+                arcname = p.relative_to(base.parent)
+                append_zip(zip, arcname, p, options)
+    except:
+        zip_path.unlink(missing_ok=True)
+        raise
+
+
+def zip_arch(
+        component_paths: dict[int, Path],
+        component_data: dict,
+        base: Path,
+        zip_path: Path,
+        arch_dir: Path,
+        options: argparse.Namespace):
+    try:
+        print(f"Writing {zip_path}")
+        with ZipFile(zip_path, "w") as zip:
+            _zip_arch(component_paths, component_data,
+                      base, zip, arch_dir, options)
+    except:
+        zip_path.unlink(missing_ok=True)
+        raise
+
+
+def _zip_arch(
+        component_paths: dict[int, Path],
+        component_data: dict,
+        base: Path,
+        zip: ZipFile,
+        arch_dir: Path,
+        options):
+    circuit_data = arch_dir / "circuit.data"
+    assembly_data = arch_dir / "assembly.data"
+    for p in [circuit_data, assembly_data] + list(arch_dir.rglob("*.assembly")):
+        arcname = p.relative_to(base.parent)
+        append_zip(zip, arcname, p, options)
+    instruction_rules_data = arch_dir / "instruction_rules.data"
+    if instruction_rules_data.exists():
+        arcname = instruction_rules_data.relative_to(base.parent)
+        append_zip(zip, arcname, instruction_rules_data, options)
+    component_factory = base / "schematics" / "component_factory"
+
+    def add_deps(deps):
+        for dependency in deps:
+            assert dependency in component_paths, f"Dependency: {dependency} of {arch_dir.name} not found"
+            dep = component_paths[dependency]
+            # arcname = dep.relative_to(base.parent)
+            arcpath = component_factory / arch_dir.name / dep.parent.name / dep.name
+            arcname = arcpath.relative_to(base.parent)
+            append_zip(zip, arcname, dep, options)
+            add_deps(component_data[dependency]["dependencies"])
+    data = save_monger.parse_state(list(circuit_data.read_bytes()))
+    add_deps(data["dependencies"])
+
 
 def main(options):
     component_paths: dict[int, Path] = dict()
@@ -43,13 +117,9 @@ def main(options):
     schematics = base / "schematics"
     timestr = time.strftime("%Y%m%d-%H%M%S")
     for level_name in options.level:
-        level = schematics / level_name
         zip_path = base.parent / f"{level_name.replace(os.path.sep, '_')}_{timestr}.zip"
-        print(f"Writing {zip_path}")
-        with ZipFile(zip_path, "w") as zip:
-            for p in list(level.rglob("circuit.data")):
-                append_zip(zip, base, p)
-    if not options.architecture:
+        zip_level(base, level_name, zip_path, options)
+    if options.level:
         return
     component_factory = schematics / "component_factory"
     architecture = schematics / "architecture"
@@ -62,22 +132,10 @@ def main(options):
         component_data[component_id] = data
     print("")
     for architecture_name in options.architecture:
-        dir = architecture / architecture_name
-        circuit_data = dir / "circuit.data"
-        assembly_data = dir / "assembly.data"
-        data = save_monger.parse_state(list(circuit_data.read_bytes()))
         zip_path = base.parent / f"{architecture_name}_{timestr}.zip"
-        print(f"Writing {zip_path}")
-        with ZipFile(zip_path, "w") as zip:
-            for p in [circuit_data, assembly_data] + list(dir.rglob("*.assembly")):
-                append_zip(zip, base, p)
-            def add_deps(deps):
-                for dependency in deps:
-                    assert dependency in component_paths, f"Dependency: {dependency} not found"
-                    dep = component_paths[dependency]
-                    append_zip(zip, base, dep)
-                    add_deps(component_data[dependency]["dependencies"])
-            add_deps(data["dependencies"])
+        arch_dir = architecture / architecture_name
+        zip_arch(component_paths, component_data,
+                 base, zip_path, arch_dir, options)
 
 
 if __name__ == "__main__":
@@ -86,18 +144,18 @@ if __name__ == "__main__":
                         action='count',
                         default=0,
                         help="Increase log level")
-    parser.add_argument('-a', '--architecture',
-                        action='append',
-                        default=[],
-                        help="Name of architecture schematic")
-    parser.add_argument('-l', '--level',
-                        action='append',
-                        default=[],
-                        help="Name of level/schematic file, eg '-l not_gate' or '-l not_gate/Default'")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('-a', '--architecture',
+                       action='append',
+                       default=[],
+                       help="Name of architecture schematic")
+    group.add_argument('-l', '--level',
+                       action='append',
+                       default=[],
+                       help="Name of level/schematic file, eg '-l not_gate' or '-l not_gate/Default'")
     parser.add_argument('-e', '--include-empty-files',
                         action='store_true',
                         default=False)
     parser.add_argument('--version', action='version', version='%(prog)s 1.0')
     options = parser.parse_args()
-    assert options.architecture or options.level, "-a or -l is required"
     main(options)
